@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Horror Game</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; -webkit-user-select: none; touch-action: none; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; position: fixed; }
+        canvas { display: block; width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; }
+        .screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 10; background: #050202; }
+        .title { color: #8b0000; font-size: 3rem; margin-bottom: 40px; text-shadow: 0 0 10px #ff0000; font-weight: bold; }
+        .btn { padding: 15px 40px; font-size: 1.5rem; color: #fff; background: rgba(139,0,0,0.8); border: 2px solid #ff0000; border-radius: 8px; cursor: pointer; pointer-events: auto; }
+        .btn:active { background: #ff0000; }
+        #game-over, #win { display: none; background: rgba(0,0,0,0.98); z-index: 20; color: #ff0000; font-size: 3rem; font-weight: bold; text-shadow: 0 0 15px #ff0000; }
+        #hud { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: none; z-index: 5; }
+        #joystick { position: absolute; bottom: 30px; left: 30px; width: 120px; height: 120px; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; pointer-events: auto; }
+        #knob { position: absolute; top: 35px; left: 35px; width: 50px; height: 50px; background: rgba(255,255,255,0.4); border-radius: 50%; }
+        #look-zone { position: absolute; top: 0; right: 0; width: 60%; height: 100%; pointer-events: auto; }
+        #action { position: absolute; bottom: 40px; right: 40px; width: 80px; height: 80px; background: rgba(255,255,255,0.2); border: 2px solid rgba(255,255,255,0.5); border-radius: 50%; color: white; display: flex; justify-content: center; align-items: center; pointer-events: auto; font-weight: bold; }
+        #run-btn { position: absolute; bottom: 140px; right: 45px; width: 65px; height: 65px; background: rgba(139,0,0,0.4); border: 2px solid #ff0000; border-radius: 50%; color: white; display: flex; justify-content: center; align-items: center; pointer-events: auto; font-size: 0.9rem; font-weight: bold; }
+        #info { position: absolute; top: 20px; left: 20px; color: #fff; font-size: 1.2rem; background: rgba(0,0,0,0.6); padding: 8px 15px; border-radius: 5px; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+    <div id="menu" class="screen">
+        <div class="title">ESCAPE</div>
+        <button class="btn" onclick="startGame()">ИГРАТЬ</button>
+    </div>
+    <div id="game-over" class="screen">
+        <div>ВЫ ПОГИБЛИ</div>
+        <button class="btn" style="margin-top:30px;" onclick="returnToMenu()">МЕНЮ</button>
+    </div>
+    <div id="win" class="screen" style="color:#ffffff;">
+        <div>ПОБЕДА! ВЫ СБЕЖАЛИ</div>
+        <button class="btn" style="margin-top:30px;" onclick="returnToMenu()">МЕНЮ</button>
+    </div>
+
+    <div id="hud">
+        <div id="info">Ключ: <span id="key-txt">Нет</span></div>
+        <div id="joystick"><div id="knob"></div></div>
+        <div id="look-zone"></div>
+        <div id="action">Рука</div>
+        <div id="run-btn">БЕГ</div>
+    </div>
+
+    <script>
+        let scene, camera, renderer, flashlight, keyMesh, doorGroup;
+        let hasKey = false, isStarted = false, isRunning = false, isDoorOpening = false;
+        let doorOpenProgress = 0;
+        let playerPos = new THREE.Vector3(0, 1.6, 11);
+        let yaw = 0, pitch = 0, moveRaw = {x:0, z:0};
+        let walkTimer = 0, stepTimer = 0;
+        
+        let monsterGroup, monsterParts = {};
+        let monsterPos = new THREE.Vector3(0, 0, -8);
+        let monsterState = 'patrol'; 
+        let monsterTimer = 0;
+        let monsterTarget = new THREE.Vector3();
+        let chaseTime = 0; // Таймер непрерывного преследования для баланса
+        let clock = new THREE.Clock();
+        const walls = [];
+        let audioCtx = null;
+
+        function initAudio() {
+            try {
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+            } catch(e) {
+                console.log("Audio not supported");
+            }
+        }
+
+        function playStepSound() {
+            if (!audioCtx) return;
+            let osc = audioCtx.createOscillator();
+            let gain = audioCtx.createGain();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(80, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(20, audioCtx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.1);
+        }
+
+        function playJumpscareSound() {
+            if (!audioCtx) return;
+            let osc = audioCtx.createOscillator();
+            let gain = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.linearRampToValueAtTime(60, audioCtx.currentTime + 0.8);
+            gain.gain.setValueAtTime(0.8, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.8);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.8);
+        }
+
+        function createConcreteTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#444444';
+            ctx.fillRect(0, 0, 512, 512);
+            for(let i=0; i<12000; i++) {
+                ctx.fillStyle = Math.random() > 0.5 ? '#222222' : '#666666';
+                ctx.fillRect(Math.random()*512, Math.random()*512, 2, 2);
+            }
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(6, 6);
+            return texture;
+        }
+                function startGame() {
+            initAudio();
+            
+            const menuEl = document.getElementById('menu');
+            const overEl = document.getElementById('game-over');
+            const winEl = document.getElementById('win');
+            const hudEl = document.getElementById('hud');
+
+            if (menuEl) menuEl.style.display = 'none';
+            if (overEl) overEl.style.display = 'none';
+            if (winEl) winEl.style.display = 'none';
+            if (hudEl) hudEl.style.display = 'block';
+            
+            resetGameState();
+            isStarted = true;
+
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x010101, 0.1);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.copy(playerPos);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            flashlight = new THREE.SpotLight(0xffffee, 4.5, 20, Math.PI / 4, 0.3);
+            scene.add(flashlight);
+            scene.add(flashlight.target);
+            scene.add(new THREE.AmbientLight(0x181818));
+
+            buildCompactMaze();
+            createTrashAndProps();
+            createArticulatedMonster();
+            createRealKey();
+            createExitDoor();
+
+            setupControls();
+            window.addEventListener('resize', onWindowResize);
+            clock.start();
+            animate();
+        }
+
+        function resetGameState() {
+            hasKey = false;
+            isRunning = false;
+            isDoorOpening = false;
+            doorOpenProgress = 0;
+            chaseTime = 0;
+            playerPos.set(0, 1.6, 11);
+            yaw = 0; pitch = 0;
+            monsterPos.set(0, 0, -8);
+            monsterState = 'patrol';
+            document.getElementById('key-txt').innerText = "Нет";
+            document.getElementById('key-txt').style.color = "#ffffff";
+            document.getElementById('run-btn').style.background = 'rgba(139,0,0,0.4)';
+        }
+
+        function buildCompactMaze() {
+            walls.length = 0;
+            const concreteTex = createConcreteTexture();
+            const wallMat = new THREE.MeshStandardMaterial({ map: concreteTex, roughness: 0.8 });
+            const floorMat = new THREE.MeshStandardMaterial({ map: concreteTex, roughness: 0.6 });
+
+            const floor = new THREE.Mesh(new THREE.PlaneGeometry(26, 26), floorMat);
+            floor.rotation.x = -Math.PI / 2; scene.add(floor);
+            
+            const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(26, 26), wallMat);
+            ceiling.position.y = 4; ceiling.rotation.x = Math.PI / 2; scene.add(ceiling);
+
+            function addWall(x, y, z, w, h, d) {
+                const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
+                m.position.set(x, y, z);
+                scene.add(m);
+                walls.push({ box: new THREE.Box3().setFromObject(m) });
+            }
+
+            addWall(0, 2, -13, 26, 4, 1);
+            addWall(0, 2, 13, 26, 4, 1);
+            addWall(-13, 2, 0, 1, 4, 26);
+            addWall(13, 2, 0, 1, 4, 26);
+
+            addWall(-5, 2, -5, 1, 4, 10);
+            addWall(5, 2, 3, 1, 4, 10);
+            addWall(-6, 2, 7, 8, 4, 1);
+        }
+                function createTrashAndProps() {
+            const boxMat = new THREE.MeshStandardMaterial({ color: 0x5c4033 });
+            const barrelMat = new THREE.MeshStandardMaterial({ color: 0x223344, metalness: 0.5 });
+            const trashBagMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.3 });
+            const bottleMat = new THREE.MeshStandardMaterial({ color: 0x005511, transparent: true, opacity: 0.7 });
+            const tireMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9 });
+
+            function addBox(x, z, s) {
+                const b = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), boxMat);
+                b.position.set(x, s/2, z); scene.add(b);
+            }
+            addBox(-10, 10, 1.2); addBox(-9, 11, 0.9); addBox(10, -10, 1.5);
+
+            function addBarrel(x, z) {
+                const b = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 1.2, 12), barrelMat);
+                b.position.set(x, 0.6, z); scene.add(b);
+            }
+            addBarrel(-11, -11); addBarrel(8, 8); addBarrel(9, 8);
+
+            function addBag(x, z) {
+                const bag = new THREE.Mesh(new THREE.SphereGeometry(0.4, 8, 8), trashBagMat);
+                bag.scale.set(1, 0.7, 1);
+                bag.position.set(x, 0.25, z); scene.add(bag);
+            }
+            addBag(-4, 4); addBag(-3.5, 4.2); addBag(4, -4);
+
+            function addBottle(x, z) {
+                const bot = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.3, 8), bottleMat);
+                bot.position.set(x, 0.15, z); scene.add(bot);
+            }
+            addBottle(1, 10); addBottle(1.2, 9.8); addBottle(-8, -2);
+
+            function addTire(x, z) {
+                const t = new THREE.Mesh(new THREE.TorusGeometry(0.4, 0.15, 8, 12), tireMat);
+                t.rotation.x = Math.PI / 2;
+                t.position.set(x, 0.15, z); scene.add(t);
+            }
+            addTire(-11, 2); addTire(11, -2);
+        }
+
+        function createExitDoor() {
+            doorGroup = new THREE.Group();
+            const frame = new THREE.Mesh(new THREE.BoxGeometry(2.6, 3.2, 0.4), new THREE.MeshStandardMaterial({ color: 0x222222 }));
+            
+            const hingeGroup = new THREE.Group();
+            hingeGroup.position.set(-1.1, 0, 0);
+            
+            const panel = new THREE.Mesh(new THREE.BoxGeometry(2.2, 3.0, 0.2), new THREE.MeshStandardMaterial({ color: 0x4a2e00 }));
+            panel.position.set(1.1, 0, 0.05);
+            hingeGroup.add(panel);
+
+            const handle = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.9 }));
+            handle.position.set(1.9, 0, 0.15);
+            hingeGroup.add(handle);
+
+            doorGroup.add(frame);
+            doorGroup.add(hingeGroup);
+            doorGroup.hinge = hingeGroup;
+
+            // Размещаем дверь на правильных координатах выхода
+            doorGroup.position.set(0, 1.6, 12.4);
+            scene.add(doorGroup);
+        }
+
+        function createRealKey() {
+            const keyGroup = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.9, roughness: 0.1 });
+            
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.03, 8, 16), mat);
+            ring.rotation.x = Math.PI / 2; keyGroup.add(ring);
+
+            const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.5), mat);
+            stem.position.z = -0.25; stem.rotation.x = Math.PI / 2; keyGroup.add(stem);
+
+            const teeth = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.02, 0.08), mat);
+            teeth.position.set(0, -0.05, -0.45); keyGroup.add(teeth);
+
+            keyGroup.position.set(-10, 0.4, -10);
+            scene.add(keyGroup);
+            keyMesh = keyGroup;
+        }
+                function createArticulatedMonster() {
+            monsterGroup = new THREE.Group();
+            const skinMat = new THREE.MeshStandardMaterial({ color: 0x3d352a, roughness: 0.9 });
+            const eyeMat = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0xff0000 });
+
+            const torso = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, 0.3), skinMat);
+            torso.position.y = 1.8; monsterGroup.add(torso);
+
+            const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.6), skinMat);
+            neck.position.y = 2.45; monsterGroup.add(neck);
+
+            const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.45, 0.45), skinMat);
+            head.position.y = 2.85; monsterGroup.add(head);
+
+            const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), eyeMat);
+            eyeL.position.set(-0.12, 2.9, -0.24); monsterGroup.add(eyeL);
+            const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), eyeMat);
+            eyeR.position.set(0.12, 2.9, -0.24); monsterGroup.add(eyeR);
+
+            function createLimbPart() {
+                const upper = new THREE.Group();
+                const uMesh = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.6, 0.15), skinMat);
+                uMesh.position.y = -0.3; upper.add(uMesh);
+
+                const lower = new THREE.Group();
+                lower.position.y = -0.6;
+                const lMesh = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.6, 0.12), skinMat);
+                lMesh.position.y = -0.3; lower.add(lMesh);
+                upper.add(lower);
+                return { upper, lower };
+            }
+
+            monsterParts.leftArm = createLimbPart();
+            monsterParts.leftArm.upper.position.set(-0.4, 2.2, 0); monsterGroup.add(monsterParts.leftArm.upper);
+
+            monsterParts.rightArm = createLimbPart();
+            monsterParts.rightArm.upper.position.set(0.4, 2.2, 0); monsterGroup.add(monsterParts.rightArm.upper);
+
+            monsterParts.leftLeg = createLimbPart();
+            monsterParts.leftLeg.upper.position.set(-0.2, 1.3, 0); monsterGroup.add(monsterParts.leftLeg.upper);
+
+            monsterParts.rightLeg = createLimbPart();
+            monsterParts.rightLeg.upper.position.set(0.2, 1.3, 0); monsterGroup.add(monsterParts.rightLeg.upper);
+
+            monsterGroup.position.copy(monsterPos);
+            scene.add(monsterGroup);
+            getNewPatrolTarget();
+        }
+
+        function setupControls() {
+            const jZone = document.getElementById('joystick'), knob = document.getElementById('knob');
+            let jId = null;
+            jZone.ontouchstart = e => { jId = e.changedTouches[0].identifier; moveJoy(e.changedTouches[0]); };
+            jZone.ontouchmove = e => { for(let t of e.changedTouches) if(t.identifier === jId) moveJoy(t); };
+            jZone.ontouchend = () => { jId = null; moveRaw = {x:0, z:0}; knob.style.left = '35px'; knob.style.top = '35px'; };
+
+            function moveJoy(t) {
+                const r = jZone.getBoundingClientRect();
+                let dx = t.clientX - (r.left + 60), dy = t.clientY - (r.top + 60);
+                let dist = Math.min(Math.hypot(dx,dy), 45), ang = Math.atan2(dy,dx);
+                knob.style.left = `${35 + Math.cos(ang)*dist}px`;
+                knob.style.top = `${35 + Math.sin(ang)*dist}px`;
+                moveRaw.x = Math.cos(ang);
+                moveRaw.z = Math.sin(ang);
+            }
+
+            let lId = null, lx = 0, ly = 0;
+            const lZone = document.getElementById('look-zone');
+            lZone.ontouchstart = e => { lId = e.changedTouches[0].identifier; lx = e.changedTouches[0].clientX; ly = e.changedTouches[0].clientY; };
+            lZone.ontouchmove = e => {
+                for(let t of e.changedTouches) {
+                    if(t.identifier === lId) {
+                        yaw -= (t.clientX - lx) * 0.005;
+                        pitch -= (t.clientY - ly) * 0.005;
+                        pitch = Math.max(-1.2, Math.min(1.2, pitch));
+                        lx = t.clientX; ly = t.clientY;
+                    }
+                }
+            };
+            lZone.ontouchend = () => lId = null;
+
+            const runBtn = document.getElementById('run-btn');
+            runBtn.onclick = () => {
+                initAudio();
+                isRunning = !isRunning;
+                runBtn.style.background = isRunning ? '#ff0000' : 'rgba(139,0,0,0.4)';
+            };
+
+            // Гарантированное взаимодействие с ключом и дверью
+            document.getElementById('action').onclick = () => {
+                initAudio();
+                // Подбор ключа
+                if (!hasKey && keyMesh && playerPos.distanceTo(keyMesh.position) < 3.0) {
+                    hasKey = true; 
+                    scene.remove(keyMesh); 
+                    keyMesh = null;
+                    document.getElementById('key-txt').innerText = "Есть";
+                    document.getElementById('key-txt').style.color = "#00ff00";
+                }
+                // Открытие двери (проверяем дистанцию до двери)
+                let distToDoor = playerPos.distanceTo(doorGroup.position);
+                if (distToDoor < 4.0) {
+                    if (hasKey) {
+                        isDoorOpening = true;
+                        document.getElementById('key-txt').innerText = "Открывается...";
+                        document.getElementById('key-txt').style.color = "#ffff00";
+                    } else {
+                        document.getElementById('key-txt').innerText = "Нужен ключ!";
+                        document.getElementById('key-txt').style.color = "#ff0000";
+                    }
+                }
+            };
+        }
+                function checkCollision(pos) {
+            const pBox = new THREE.Box3(
+                new THREE.Vector3(pos.x - 0.3, 0, pos.z - 0.3),
+                new THREE.Vector3(pos.x + 0.3, 3, pos.z + 0.3)
+            );
+            for (let w of walls) {
+                if (pBox.intersectsBox(w.box)) return true;
+            }
+            return false;
+        }
+
+        let currentFlashPos = new THREE.Vector3();
+        let currentFlashTarget = new THREE.Vector3();
+
+        function animate() {
+            if(!isStarted) return;
+            requestAnimationFrame(animate);
+            let delta = clock.getDelta();
+
+            // Анимация плавного открытия двери и победа
+            if (isDoorOpening) {
+                doorOpenProgress += delta * 1.5;
+                if (doorOpenProgress > Math.PI / 2) {
+                    doorOpenProgress = Math.PI / 2;
+                    setTimeout(() => {
+                        document.getElementById('win').style.display = 'flex';
+                        isStarted = false;
+                    }, 400);
+                }
+                doorGroup.hinge.rotation.y = doorOpenProgress;
+            }
+
+            camera.rotation.order = 'YXZ';
+            camera.rotation.y = yaw; camera.rotation.x = pitch;
+
+            let fwd = new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+            let side = new THREE.Vector3(1,0,0).applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+            let dir = new THREE.Vector3().addScaledVector(fwd, -moveRaw.z).addScaledVector(side, moveRaw.x);
+            
+            let currentSpeed = isRunning ? 6.2 : 3.0;
+            let isMoving = (moveRaw.x !== 0 || moveRaw.z !== 0);
+            
+            if (isMoving) {
+                let nextPos = playerPos.clone().addScaledVector(dir, currentSpeed * delta);
+                if (!checkCollision(new THREE.Vector3(nextPos.x, playerPos.y, playerPos.z))) playerPos.x = nextPos.x;
+                if (!checkCollision(new THREE.Vector3(playerPos.x, playerPos.y, nextPos.z))) playerPos.z = nextPos.z;
+
+                walkTimer += delta * (isRunning ? 16 : 10);
+                stepTimer += delta * (isRunning ? 2.0 : 1.2);
+                if (stepTimer > 1.0) {
+                    playStepSound();
+                    stepTimer = 0;
+                }
+                camera.position.y = 1.6 + Math.sin(walkTimer) * 0.08;
+            } else {
+                camera.position.y = 1.6;
+            }
+            camera.position.x = playerPos.x;
+            camera.position.z = playerPos.z;
+
+            let targetFlashPos = camera.position.clone().add(new THREE.Vector3(0.2, -0.1, 0));
+            if (isMoving) {
+                targetFlashPos.x += Math.sin(walkTimer * 0.8) * 0.05;
+                targetFlashPos.y += Math.cos(walkTimer * 1.6) * 0.04;
+            }
+            currentFlashPos.lerp(targetFlashPos, 0.15);
+            flashlight.position.copy(currentFlashPos);
+
+            let idealTarget = camera.position.clone().add(fwd.multiplyScalar(6));
+            currentFlashTarget.lerp(idealTarget, 0.2);
+            flashlight.target.position.copy(currentFlashTarget);
+
+            let distToPlayer = monsterGroup.position.distanceTo(playerPos);
+            if (distToPlayer < 13) monsterState = 'chase';
+
+            // Логика состояний монстра с балансом (усталость после 10 сек погони на 8 секунд)
+            if (monsterState === 'chase') {
+                chaseTime += delta;
+                if (chaseTime >= 10.0) {
+                    monsterState = 'resting';
+                    monsterTimer = 8.0; // Стоит на месте 8 секунд
+                    chaseTime = 0;
+                } else {
+                    monsterTarget.copy(playerPos);
+                    moveMonsterWithCollision(delta, 3.8);
+                    animateMonster(delta, true, true);
+                    
+                    camera.position.x += (Math.random() - 0.5) * 0.07;
+                    camera.position.y += (Math.random() - 0.5) * 0.07;
+
+                    let exactDist = Math.hypot(monsterGroup.position.x - playerPos.x, monsterGroup.position.z - playerPos.z);
+                    if (exactDist < 1.4) {
+                        playJumpscareSound();
+                        document.getElementById('hud').style.display = 'none';
+                        document.getElementById('game-over').style.display = 'flex';
+                        isStarted = false;
+                    }
+                }
+            } else if (monsterState === 'resting') {
+                // Монстр устал и отдыхает (дает фору игроку)
+                monsterTimer -= delta;
+                animateMonster(delta, false, false);
+                if (monsterTimer <= 0) {
+                    monsterState = 'patrol';
+                    getNewPatrolTarget();
+                }
+            } else if (monsterState === 'patrol') {
+                chaseTime = 0;
+                moveMonsterWithCollision(delta, 1.2);
+                animateMonster(delta, true, false);
+                if (monsterGroup.position.distanceTo(monsterTarget) < 1.0) {
+                    monsterState = 'wait';
+                    monsterTimer = 5.0;
+                }
+            } else if (monsterState === 'wait') {
+                chaseTime = 0;
+                monsterTimer -= delta;
+                animateMonster(delta, false, false);
+                if (monsterTimer <= 0) {
+                    getNewPatrolTarget();
+                    monsterState = 'patrol';
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function moveMonsterWithCollision(delta, speed) {
+            let mDir = new THREE.Vector3().subVectors(monsterTarget, monsterGroup.position);
+            mDir.y = 0; mDir.normalize();
+            let nextM = monsterGroup.position.clone().addScaledVector(mDir, speed * delta);
+            
+            let mBox = new THREE.Box3(
+                new THREE.Vector3(nextM.x - 0.4, 0, nextM.z - 0.4),
+                new THREE.Vector3(nextM.x + 0.4, 3, nextM.z + 0.4)
+            );
+            let canMove = true;
+            for (let w of walls) {
+                if (mBox.intersectsBox(w.box)) { canMove = false; break; }
+            }
+
+            if (canMove) {
+                monsterGroup.position.copy(nextM);
+            } else {
+                getNewPatrolTarget();
+            }
+            monsterGroup.lookAt(monsterTarget.x, monsterGroup.position.y, monsterTarget.z);
+        }
+
+        function animateMonster(delta, isMoving, isChasing) {
+            if (isMoving) {
+                let t = Date.now() * (isChasing ? 0.015 : 0.007);
+                let intensity = isChasing ? 0.8 : 0.4;
+                
+                monsterParts.leftLeg.upper.rotation.x = Math.sin(t) * intensity;
+                monsterParts.leftLeg.lower.rotation.x = Math.max(0, Math.sin(t)) * intensity;
+                monsterParts.rightLeg.upper.rotation.x = -Math.sin(t) * intensity;
+                monsterParts.rightLeg.lower.rotation.x = Math.max(0, -Math.sin(t)) * intensity;
+
+                monsterParts.leftArm.upper.rotation.x = -Math.sin(t) * 0.6;
+                monsterParts.rightArm.upper.rotation.x = Math.sin(t) * 0.6;
+                
+                monsterGroup.rotation.z = Math.sin(t * 0.5) * 0.1;
+            } else {
+                monsterParts.leftLeg.upper.rotation.x = 0;
+                monsterParts.leftLeg.lower.rotation.x = 0;
+                monsterParts.rightLeg.upper.rotation.x = 0;
+                monsterParts.rightLeg.lower.rotation.x = 0;
+                monsterParts.leftArm.upper.rotation.x = 0;
+                monsterParts.rightArm.upper.rotation.x = 0;
+                monsterGroup.rotation.z = 0;
+            }
+        }
+
+        function getNewPatrolTarget() {
+            monsterTarget.set((Math.random() - 0.5) * 22, 0, (Math.random() - 0.5) * 22);
+        }
+
+        function returnToMenu() {
+            document.getElementById('game-over').style.display = 'none';
+            document.getElementById('win').style.display = 'none';
+            document.getElementById('hud').style.display = 'none';
+            document.getElementById('menu').style.display = 'flex';
+            if (renderer && renderer.domElement) {
+                renderer.domElement.remove();
+            }
+        }
+
+        function onWindowResize() {
+            if (!camera || !renderer) return;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
